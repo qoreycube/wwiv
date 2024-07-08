@@ -83,21 +83,27 @@ static void handle_inst_msg(const instance_message_t& ih) {
   if (a()->sess().hangup() || !a()->sess().IsUserOnline()) {
     return;
   }
+  if (ih.message.length() >= 3) {
+    if (ih.message[0] == 1 && ih.message[1] == 2 && ih.message[2] == 3) {
+      a()->Hangup();
+      return;
+    }
+  }
   const auto line = bout.SaveCurrentLine();
-  bout.nl(2);
   if (a()->sess().in_chatroom()) {
-    bout.pl(ih.message);
+    bout.outstr(ih.message);
     bout.RestoreCurrentLine(line);
     return;
   }
   if (ih.message_type == instance_message_type_t::system) {
+    bout.nl(2);
     const auto from_user_name = a()->names()->UserName(ih.from_user);
     bout.printf("|#1%.12s (%d)|#0> |#2", from_user_name, ih.from_instance);
   } else {
+    bout.nl(2);
     bout.outstr("|#6[SYSTEM ANNOUNCEMENT] |#7> |#2");
   }
   bout.pl(ih.message);
-  bout.nl();
   bout.RestoreCurrentLine(line);
 }
 

@@ -378,9 +378,40 @@ int Output::outstr(const std::string& text) {
         os::sleep_for(milliseconds(10));
       }
     }
+    // LORD codes.
+    if (*it == '`') {
+      ++it;
+      if (it == fin) {
+        num_written += outchr('`', true);
+        break;
 
-    // pipe codes.
-    if (*it == '|') {
+      }
+      if (std::isdigit(*it)) {
+        int color = pipecode_int(it, fin, 1);
+        if (color < 16) {
+          if (color == 0) {
+            color=10;
+          }
+          setc(color | (curatr() & 0xf0));
+        } 
+      } else if (*it == '!' || *it == '@' || *it == '#' || *it == '$' || *it == '%') {
+        int color = 10;
+        switch (*it) {
+          case '!': color=11; break;
+          case '@': color=12; break;
+          case '#': color=13; break;
+          case '$': color=14; break;
+          case '%': color=15; break;
+        }
+        setc(color | (curatr() & 0xf0));
+        ++it;
+      } else {
+        num_written += outchr('`',true);
+        num_written += outchr(*it,true);
+      }
+    }
+    //pipe codes.
+    else if (*it == '|') {
       ++it;
       if (it == fin) {
         num_written += outchr('|', true);

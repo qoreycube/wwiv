@@ -67,24 +67,24 @@ static ch_type channels[11];
 int rip_words(int start_pos, const char* cmsg, char* wd, int size, char lookfor);
 int f_action(int start_pos, int end_pos, char* aword);
 int main_loop(const char* message, char* from_message, char* color_string, char* messageSent,
-              bool& bActionMode, int loc, int num_actions);
-std::vector<int> who_online(int loc);
-void intro(int loc);
-void ch_direct(const std::string& message, int loc, char* color_string, int node);
-void ch_whisper(const std::string&, char* color_string, int node);
+              bool& bActionMode, int channel_number, int num_actions);
+std::vector<int> who_online(int channel_number);
+void intro(int channel_number);
+void ch_direct(const std::string& message, int channel_number, char* color_string, int node);
+void ch_whisper(const std::string&, std::string chatHandle, int channel_number, int node);
 int wusrinst(char* n);
 void secure_ch(int ch);
 void cleanup_chat();
-void page_user(int loc);
-void moving(bool bOnline, int loc);
+void page_user(int channel_number, std::string chatHandle);
+void moving(bool bOnline, int channel_number);
 void load_actions(IniFile* pIniFile);
 void add_action(ch_action act);
 void free_actions();
-void exec_action(const char* message, char* color_string, int loc, int nact);
+void exec_action(const char* message, char* color_string, int channel_number, int nact);
 void action_help(int num);
-void ga(const char* message, char* color_string, int loc, int type);
+void ga(const char* message, char* color_string, int channel_number, int type);
 void list_channels();
-int change_channels(int loc);
+int change_channels(int channel_number);
 bool check_ch(int ch);
 void load_channels(IniFile& pIniFile);
 int userinst(char* user);
@@ -179,13 +179,14 @@ void chat_room() {
     return;
   }
   cleanup_chat();
-  bout.outstr("\r\n|#2Welcome to the WWIV Chatroom\n\r\n");
-  auto loc = 0;
+  bout.cls();
+  bout.outstr("\r\n|#2Welcome to the WWIV Chatroom\r\n");
+  auto channel_number = 0;
   if (bShowPrompt) {
-    while (!loc) {
+    while (!channel_number) {
       bout.nl();
       bout.outstr("|#1Select a chat channel to enter:\r\n");
-      loc = change_channels(-1);
+      channel_number = change_channels(-1);
     }
   } else {
     if (a()->user()->restrict_iichat() || !check_ch(1)) {
@@ -193,10 +194,10 @@ void chat_room() {
       bout.pausescr();
       return;
     }
-    loc = INST_LOC_CH1;
-    write_inst(loc, 0, INST_FLAGS_NONE);
-    moving(true, loc);
-    intro(loc);
+    channel_number = INST_LOC_CH1;
+    write_inst(channel_number, 0, INST_FLAGS_NONE);
+    moving(true, channel_number);
+    intro(channel_number);
     bout.nl();
   }
 
@@ -218,19 +219,19 @@ void chat_room() {
     a()->sess().chatline(false);
     auto message = bin.input_text("", false, 255);
     if (message.empty()) {
-      intro(loc);
+      intro(channel_number);
     } else {
-      int c = main_loop(message.c_str(), szFromMessage, szColorString, szMessageSent, bActionMode, loc,
+      int channel = main_loop(message.c_str(), szFromMessage, szColorString, szMessageSent, bActionMode, channel_number,
                         g_nNumActions);
-      if (!c) {
+      if (!channel) {
         break;
       } else {
-        loc = c;
+        channel_number = channel;
       }
     }
   }
   setiia(oiia);
-  moving(false, loc);
+  moving(false, channel_number);
   free_actions();
   a()->sess().in_chatroom(false);
 }
@@ -287,48 +288,105 @@ int f_action(int start_pos, int end_pos, char* aword) {
 }
 
 // Sends out a raw_message to everyone in channel LOC
-static void out_msg(const std::string& message, int loc) {
+static void out_msg(const std::string& message, int channel_number) {
   for (auto i = 1; i <= num_instances(); i++) {
     auto ir = a()->instances().at(i);
-    if (ir.loc_code() == loc && i != a()->sess().instance_number()) {
+    if (ir.loc_code() == channel_number) { // && i != a()->sess().instance_number()) { // I want it to send to everyone.
       send_inst_str(i, message);
     }
   }
 }
 
 // Determines if a word is an action, if so, executes it
-bool check_action(const char* message, char* color_string, int loc) {
+bool check_action(const char* message, char* color_string, int channel_number) {
   char s[12];
 
   unsigned int x = rip_words(0, message, s, 12, ' ');
   if (iequals("GA", s)) {
-    ga(message + x, color_string, loc, 0);
+    ga(message + x, color_string, channel_number, 0);
     return true;
   }
   if (iequals("GA's", s)) {
-    ga(message + x, color_string, loc, 1);
+    ga(message + x, color_string, channel_number, 1);
     return true;
   }
   int p = f_action(0, g_nNumActions, s);
   if (p != -1) {
     if (strlen(message) <= x) {
-      exec_action("\0", color_string, loc, p);
+      exec_action("\0", color_string, channel_number, p);
     } else {
-      exec_action(message + x, color_string, loc, p);
+      exec_action(message + x, color_string, channel_number, p);
     }
     return true;
   }
   return false;
 }
 
-int main_loop(const char* raw_message, char* from_message, char* color_string, char* messageSent,
-              bool& bActionMode, int loc, int num_actions) {
-  User u;
+struct ChatCommand {
+  std::string command;
+  int instance;
+  std::string message;
+  
+  ChatCommand() {
+    this->instance = -1;
+    this->message="";
+    this->command="";
+  }
 
+  bool Parse(const char *strCommand) {
+    if (strCommand[0] != '/' && strCommand[0] != '.') {
+      return false;
+    }
+    bool onCommand = true;
+    bool onInstance = false;
+    bool onMessage = false;
+    std::string instanceNum = "";
+
+    for (int i=1; i < strlen(strCommand); i++) {
+      if (isalpha(strCommand[i])) {
+        if (onCommand) {
+          this->command += strCommand[i];
+        } else if (onInstance) {
+          this->message += strCommand[i];
+          onInstance = false;
+          onMessage = true;
+          this->instance = stoi(instanceNum);
+        } else if (onMessage) {
+          this->message += strCommand[i];
+        }
+      } else if (isdigit(strCommand[i])) {
+        if (onCommand) {
+          onCommand = false;
+          onInstance = true;
+          instanceNum += strCommand[i];
+        } else if (onInstance) {
+          instanceNum += strCommand[i];
+        } else if (onMessage) {
+          this->message += strCommand[i];
+        }
+      }
+    }
+    if (onInstance && instanceNum.length() != 0) {
+      this->instance = stoi(instanceNum);
+    }
+    return true;
+  }
+};
+
+std::string GenerateUserInformation(int instanceNumber, int channelNumber, std::string handle) {
+  return fmt::sprintf("`7%c%02d`8[`%%C%d:`%%%s`8>", cs()?'+':'#',instanceNumber, (channelNumber - 5000 + 1), handle);
+}
+
+int main_loop(const char* raw_message, char* from_message, char* color_string, char* messageSent,
+              bool& bActionMode, int channel_number, int num_actions) {
+  User u;
+  static std::string chatHandle = a()->user()->name();
+  
   bool bActionHandled = true;
   if (bActionMode) {
-    bActionHandled = !check_action(raw_message, color_string, loc);
+    bActionHandled = !check_action(raw_message, color_string, channel_number);
   }
+  bout.pl('mainloop!');
   if (iequals(raw_message, "/w")) {
     bActionHandled = 0;
     multi_instance();
@@ -355,64 +413,106 @@ int main_loop(const char* raw_message, char* from_message, char* color_string, c
     }
   } else if (iequals(raw_message, "/s")) {
     bActionHandled = 0;
-    secure_ch(loc);
+    secure_ch(channel_number);
   } else if (iequals(raw_message, "/u")) {
     bActionHandled = 0;
-    const auto fn = fmt::format("CHANNEL.{}", (loc + 1 - INST_LOC_CH1));
+    const auto fn = fmt::format("CHANNEL.{}", (channel_number + 1 - INST_LOC_CH1));
     if (File::Exists(fn)) {
       File::Remove(fn);
       const auto m = fmt::format("\r\n|#1[|#9{} has unsecured the channel|#1]", a()->user()->name());
-      out_msg(m, loc);
+      out_msg(m, channel_number);
       bout.outstr("|#1[|#9Channel Unsecured|#1]\r\n");
     } else {
       bout.outstr("|#1[|#9Channel not secured!|#1]\r\n");
     }
-  } else if (iequals(raw_message, "/p")) {
-    bActionHandled = 0;
-    page_user(loc);
   } else if (iequals(raw_message, "/c")) {
-    int nChannel = change_channels(loc);
-    loc = nChannel;
+    int nChannel = change_channels(channel_number);
+    channel_number = nChannel;
     bActionHandled = 0;
   } else if (iequals(raw_message, "?") || iequals(raw_message, "/?")) {
     bActionHandled = 0;
     bout.print_help_file(CHAT_NOEXT);
   } else if (bActionHandled && raw_message[0] == '>') {
     bActionHandled = 0;
-    int nUserNum = grabname(raw_message + 1, loc);
+    int nUserNum = grabname(raw_message + 1, channel_number);
     if (nUserNum) {
       auto message = StripName(raw_message);
-      ch_direct(message, loc, color_string, nUserNum);
+      ch_direct(message, channel_number, color_string, nUserNum);
     }
-  } else if (bActionHandled && raw_message[0] == '/') {
-    int nUserNum = grabname(raw_message + 1, 0);
-    if (nUserNum) {
-      auto message = StripName(raw_message);
-      ch_whisper(message, color_string, nUserNum);
-    }
-    bActionHandled = 0;
-  } else {
-    if (bActionHandled) {
-      bout.outstr(messageSent);
-    }
-    if (!raw_message[0]) {
-      return loc;
+  } else if (bActionHandled && strlen(raw_message) > 1 && (raw_message[0]=='.' || raw_message[0]=='/')) {
+    bout.pl("ChatCommand Constructor");
+    ChatCommand chatCommand = ChatCommand();
+    bout.pl("ChatCommand Parse");
+    if (chatCommand.Parse(raw_message)) {
+      if (cs() && chatCommand.command == "kill") {
+          bActionHandled = 0;
+        if (chatCommand.instance != -1) {
+          char str[10];
+          sprintf(str, "%c%c%c",1,2,3);
+          send_inst_str(chatCommand.instance, str);
+          bout.printf("--> Sent kill message to instance %d.", chatCommand.instance);
+          bout.nl();
+        } 
+        else 
+        {
+          bout.pl("Command: KILL - Forces a disconnect on the instance");
+          bout.pl("--> Usage: /k(#) - # being an instance");
+        }
+      } else if (chatCommand.command[0] == 'h' || chatCommand.command[0] == 'H') {
+        bout.pl("ChatCommand HANDLE");
+        
+        if (strlen(raw_message) == 2) {
+          bout.pl("Command: H(andle) - Changes your chat handle");
+          bout.pl("--> Usage: /h(new handle)");
+        } else {
+          bout.pl("ChatCommand HANDLE BEGIN");
+          bout.pl("ChatCommand HANDLE Raw_Message+2)");
+          chatHandle = std::string(raw_message+2);
+
+          if (chatHandle.at(0) == ' ' && chatHandle.length() > 1) {
+            bout.pl("ChatCommand HANDLE Raw_Message+3");
+          
+            chatHandle = std::string(raw_message+3);
+          }
+          bout.pl("ChatCommand HANDLE Print");
+          bout.printf("-> Your chat handle is now '%s'",chatHandle);
+          bout.nl();
+          bout.pl("ChatCommand HANDLE Handled");
+
+          bActionHandled = 0;
+        }
+      } else if (chatCommand.command == "p" || chatCommand.command == "P") {
+          if (chatCommand.instance != -1) {
+            ch_whisper(chatCommand.message, chatHandle, channel_number, chatCommand.instance);
+            bActionHandled = 0;
+          }
+      } else if (chatCommand.command == "page" || chatCommand.command == "PAGE") {
+        bActionHandled = 0;
+        page_user(channel_number, chatHandle);
+      }
+    } else {
+      if (bActionHandled) {
+        //bout.outstr(messageSent);
+      }
+      if (!raw_message[0]) {
+        return channel_number;
+      }
     }
   }
   if (bActionHandled) {
-    const auto t = fmt::sprintf(from_message, a()->user()->name(), color_string, raw_message);
-    out_msg(t, loc);
+    const auto t = fmt::sprintf("%s `7%s", GenerateUserInformation(a()->sess().instance_number(), channel_number, chatHandle), raw_message);
+    out_msg(t, channel_number);
   }
-  return loc;
+  return channel_number;
 }
 
 // Fills an array with information of who's online.
-std::vector<int> who_online(int loc) {
+std::vector<int> who_online(int channel_number) {
   std::vector<int> r{};
   for (auto i = 1; i <= wwiv::stl::size_int(a()->instances()); i++) {
     const auto ir = a()->instances().at(i);
     if (!ir.invisible() || so()) {
-      if (ir.loc_code() == loc && i != a()->sess().instance_number()) {
+      if (ir.loc_code() == channel_number && i != a()->sess().instance_number()) {
         r.emplace_back(i);
       }
     }
@@ -423,10 +523,10 @@ std::vector<int> who_online(int loc) {
 // Displays which channel the user is in, who's in the channel with them,
 // whether or not the channel is secured, and tells the user how to obtain
 // help
-void intro(int loc) {
+void intro(int channel_number) {
 
-  bout.print("|#7You are in {} with: \r\n", channels[loc - INST_LOC_CH1 + 1].name);
-  auto users = who_online(loc);
+  bout.print("|#7You are in {} with: \r\n", channels[channel_number - INST_LOC_CH1 + 1].name);
+  auto users = who_online(channel_number);
   if (!users.empty()) {
     auto first = true;
     for (const auto& usernum : users) {
@@ -438,34 +538,35 @@ void intro(int loc) {
       bout.print("|#1{} ", u.name());
       first = false;
     }
+    bout.nl();
   } else {
     bout.outstr("|#7You are the only one here.\r\n");
   }
-  const auto fn = fmt::format("CHANNEL.{}", (loc + 1 - INST_LOC_CH1));
-  if (loc != INST_LOC_CH1 && File::Exists(fn)) {
+  const auto fn = fmt::format("CHANNEL.{}", (channel_number + 1 - INST_LOC_CH1));
+  if (channel_number != INST_LOC_CH1 && File::Exists(fn)) {
     bout.outstr("|#7This channel is |#1secured|#7.\r\n");
   }
-  bout.outstr("|#7Type ? for help.\r\n");
+  bout.outstr("|#7Type /? for help.\r\n");
 }
 
 // This function is called when a > sign is encountered at the beginning of
 //   a line, it's used for directing messages
 
-void ch_direct(const std::string& message, int loc, char* color_string, int node) {
+void ch_direct(const std::string& message, int channel_number, char* color_string, int node) {
   if (message.empty()) {
     bout.outstr("|#1[|#9Message required after using a / or > command.|#1]\r\n");
     return;
   }
 
   auto ir = a()->instances().at(node);
-  if (ir.loc_code() == loc) {
+  if (ir.loc_code() == channel_number) {
     User u;
     a()->users()->readuser(&u, ir.user_number());
     const auto s = fmt::sprintf("|#9From %.12s|#6 [to %s]|#1: %s%s", a()->user()->name(),
                                 u.name(), color_string, message);
     for (auto i = 1; i <= num_instances(); i++) {
       ir = a()->instances().at(i);
-      if (ir.loc_code() == loc && i != a()->sess().instance_number()) {
+      if (ir.loc_code() == channel_number && i != a()->sess().instance_number()) {
         send_inst_str(i, s);
       }
     }
@@ -478,7 +579,7 @@ void ch_direct(const std::string& message, int loc, char* color_string, int node
 
 // This function is called when a / sign is encountered at the beginning of
 //   a raw_message, used for whispering
-void ch_whisper(const std::string& message, char* color_string, int node) {
+void ch_whisper(const std::string& message, const std::string chatHandle, int channel_number, int node) {
   if (message.empty()) {
     bout.outstr("|#1[|#9Message required after using a / or > command.|#1]\r\n");
     return;
@@ -490,8 +591,7 @@ void ch_whisper(const std::string& message, char* color_string, int node) {
   auto text = message;
   const auto ir = a()->instances().at(node);
   if (ir.in_channel()) {
-    text = fmt::sprintf("|#9From %.12s|#6 [WHISPERED]|#2|#1:%s%s", a()->user()->name(),
-                        color_string, message);
+    text = fmt::sprintf("`@P%s %s", GenerateUserInformation(a()->sess().instance_number(), channel_number, chatHandle), message);
   }
   send_inst_str(node, text);
   if (auto ou = a()->users()->readuser(ir.user_number())) {
@@ -502,7 +602,6 @@ void ch_whisper(const std::string& message, char* color_string, int node) {
 // This function determines whether or not user N is online
 
 int wusrinst(char* n) {
-
   for (auto i = 0; i <= num_instances(); i++) {
     auto ir = a()->instances().at(i);
     if (ir.online()) {
@@ -551,10 +650,10 @@ void cleanup_chat() {
 
 // Pages a user
 
-void page_user(int loc) {
+void page_user(int channel_number, std::string chatHandle) {
   int i = 0;
 
-  loc = loc + 1 - INST_LOC_CH1;
+  channel_number = channel_number + 1 - INST_LOC_CH1;
   bout.nl();
   multi_instance();
   bout.nl();
@@ -583,20 +682,20 @@ void page_user(int loc) {
   const auto s = fmt::format(
       "{} is paging you from Chatroom channel {}.  Type /C from the MAIN MENU to enter the "
       "Chatroom.",
-      a()->user()->name(), loc);
+      chatHandle, channel_number);
   send_inst_str(i, s);
-  bout.outstr("|#1[|#9Page Sent|#1]\r\n");
+  bout.outstr("-> |#1[|#9Page Sent|#1]\r\n");
 }
 
 // Announces when a user has left a channel
 
-void moving(bool bOnline, int loc) {
+void moving(bool bOnline, int channel_number) {
   if (is_chat_invis()) {
     return;
   }
-  const auto s = fmt::format("|#6{} {}", a()->user()->name(),
-          (bOnline ? "is on the air." : "has signed off."));
-  out_msg(s, loc);
+  const auto s = fmt::sprintf("--> %s `7%s", GenerateUserInformation(a()->sess().instance_number(), channel_number, a()->user()->name()),
+          (bOnline ? "has entered the chat." : "has left the chat."));
+  out_msg(s, channel_number);
 }
 
 
@@ -669,7 +768,7 @@ void free_actions() {
 
 // "Executes" an action
 
-void exec_action(const char* message, char* color_string, int loc, int nact) {
+void exec_action(const char* message, char* color_string, int channel_number, int nact) {
   char tmsg[150], final[170];
 
   bool ok = (strlen(message) == 0) ? false : true;
@@ -680,7 +779,7 @@ void exec_action(const char* message, char* color_string, int loc, int nact) {
 
   int p = 0;
   if (ok) {
-    p = grabname(message, loc);
+    p = grabname(message, channel_number);
     if (!p) {
       return;
     }
@@ -696,7 +795,7 @@ void exec_action(const char* message, char* color_string, int loc, int nact) {
   bout.pl(actions[nact]->toprint);
   sprintf(final, "%s%s", color_string, tmsg);
   if (!ok) {
-    out_msg(final, loc);
+    out_msg(final, channel_number);
   } else {
     send_inst_str(p, final);
     const auto oa = a()->users()->readuser(a()->instances().at(p).user_number());
@@ -705,10 +804,10 @@ void exec_action(const char* message, char* color_string, int loc, int nact) {
     }
     sprintf(tmsg, actions[nact]->toall, a()->user()->GetName(), oa.value().GetName());
     sprintf(final, "%s%s", color_string, tmsg);
-    for (int c = 1; c <= num_instances(); c++) {
-      const auto ir = a()->instances().at(c);
-      if (ir.loc_code() == loc && c != a()->sess().instance_number() && c != p) {
-        send_inst_str(c, final);
+    for (int channel = 1; channel <= num_instances(); channel++) {
+      const auto ir = a()->instances().at(channel);
+      if (ir.loc_code() == channel_number && channel != a()->sess().instance_number() && channel != p) {
+        send_inst_str(channel, final);
       }
     }
   }
@@ -738,7 +837,7 @@ void action_help(int num) {
 
 // Executes a GA command
 
-void ga(const char* message, char* color_string, int loc, int type) {
+void ga(const char* message, char* color_string, int channel_number, int type) {
   if (!strlen(message) || message[0] == '\0') {
     bout.outstr("|#1[|#9A message is required after the GA command|#1]\r\n");
     return;
@@ -746,7 +845,7 @@ void ga(const char* message, char* color_string, int loc, int type) {
   char buffer[500];
   sprintf(buffer, "%s%s%s %s", color_string, a()->user()->GetName(), (type ? "'s" : ""), message);
   bout.outstr("|#1[|#9Generic Action Sent|#1]\r\n");
-  out_msg(buffer, loc);
+  out_msg(buffer, channel_number);
 }
 
 // Lists the chat channels
@@ -801,7 +900,7 @@ void list_channels() {
 }
 
 // Calls list_channels() then prompts for a channel to change to.
-int change_channels(int loc) {
+int change_channels(int channel_number) {
   auto ch_ok = 0, temploc = 0;
   char szMessage[80];
 
@@ -814,7 +913,7 @@ int change_channels(int loc) {
     bout.outstr("|#1Enter a channel number, 1 to 10, Q to quit: ");
     bin.input(szMessage, 2);
     if (to_upper_case_char(szMessage[0]) == 'Q') {
-      return loc;
+      return channel_number;
     }
     temploc = to_number<int>(szMessage);
   }
@@ -833,17 +932,17 @@ int change_channels(int loc) {
       }
     }
     if (ch_ok) {
-      if (loc != -1) {
-        moving(false, loc);
+      if (channel_number != -1) {
+        moving(false, channel_number);
       }
-      loc = temploc + (INST_LOC_CH1 - 1);
-      write_inst(loc, 0, INST_FLAGS_NONE);
-      moving(true, loc);
+      channel_number = temploc + (INST_LOC_CH1 - 1);
+      write_inst(channel_number, 0, INST_FLAGS_NONE);
+      moving(true, channel_number);
       bout.nl();
-      intro(loc);
+      intro(channel_number);
     }
   }
-  return loc;
+  return channel_number;
 }
 
 // Checks to see if user has requirements to enter a channel
